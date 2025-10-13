@@ -3,11 +3,18 @@ import logging, os
 logging.basicConfig(level=os.environ.get("LOGLEVEL","INFO"))
 log = logging.getLogger(__name__)
 
-from pyhdf.SD import SD, SDC
 import h5py, octvi.extract
 import numpy as np
 from osgeo import gdal
 from osgeo.gdal_array import *
+
+# Import pyhdf for HDF4 files
+try:
+    from pyhdf.SD import SD, SDC
+    PYHDF_AVAILABLE = True
+except ImportError:
+    log.warning("pyhdf not available. HDF4 file support will be limited.")
+    PYHDF_AVAILABLE = False
 
 supported_indices = ["NDVI","GCVI","NDWI"]
 
@@ -350,89 +357,262 @@ def mask(in_array, source_stack) -> "numpy array":
 	## return output
 	return in_array
 
-def toRaster(in_array, out_path, model_file, dtype=None, *args, **kwargs) -> None:
-    """
-    Save numpy array to raster using model file for geospatial info
-    """
-    # Determine number of output bands
-    nbands = 2 if kwargs.get("qa_array") is not None else 1
-    
-    ext = os.path.splitext(model_file)[1]
-    
-    if ext == ".hdf":
-        # Use pyhdf to get metadata from HDF4
-        hdf = SD(model_file, SDC.READ)
-        
-        # Get first dataset for geotransform
-        dataset_names = list(hdf.datasets().keys())
-        if dataset_names:
-            dataset = hdf.select(dataset_names[0])
-            attrs = dataset.attributes()
-            
-            # Try to get projection info from global attributes
-            global_attrs = hdf.attributes()
-            
-            # For MODIS, projection is typically Sinusoidal
-            sr = 'PROJCS["unnamed",GEOGCS["Unknown datum based upon the custom spheroid",DATUM["Not specified (based on custom spheroid)",SPHEROID["Custom spheroid",6371007.181,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Sinusoidal"],PARAMETER["longitude_of_center",0],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["Meter",1]]'
-            
-            # Extract geotransform from StructMetadata
-            if 'StructMetadata.0' in global_attrs:
-                struct_meta = global_attrs['StructMetadata.0']
-                # Parse for UL corner and pixel size
-                # This requires parsing the StructMetadata string
-                pass
-            
-            hdf.end()
-            
-            # Fallback to GDAL for geotransform
-            refDs = gdal.Open(model_file, 0)
-            geoTransform = refDs.GetGeoTransform()
-            if sr == '':
-                sr = refDs.GetProjection()
-            refDs = None
-            
-    elif ext == ".h5":
-        # Use h5py for HDF5 (VIIRS)
-        with h5py.File(model_file, 'r') as f:
-            fileMetadata = f['HDFEOS INFORMATION']['StructMetadata.0'][()].split()
-            fileMetadata = [m.decode('utf-8') for m in fileMetadata]
-            ulc = [i for i in fileMetadata if 'UpperLeftPointMtrs' in i][0]
-            ulcLon = float(ulc.split('=(')[-1].replace(')', '').split(',')[0])
-            ulcLat = float(ulc.split('=(')[-1].replace(')', '').split(',')[1])
-            
-            pixelSize = 463.3127165
-            if 'CMG' in os.path.basename(model_file):
-                ulcLon = ulcLon / 1000000
-                ulcLat = ulcLat / 1000000
-                pixelSize = 0.05
-                
-            geoTransform = (ulcLon, pixelSize, 0.0, ulcLat, 0.0, -pixelSize)
-            sr = 'PROJCS["unnamed",GEOGCS["Unknown datum based upon the custom spheroid",DATUM["Not specified (based on custom spheroid)",SPHEROID["Custom spheroid",6371007.181,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Sinusoidal"],PARAMETER["longitude_of_center",0],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["Meter",1]]'
-    
-    rasterYSize, rasterXSize = in_array.shape
-    
-    # Rest of function remains the same...
-    typeTable = {"Byte": gdal.GDT_Byte, "Int16": gdal.GDT_Int16, 
-                 "Int32": gdal.GDT_Int32, "Float32": gdal.GDT_Float32, 
-                 "Float64": gdal.GDT_Float64}
-    outType = typeTable.get(dtype, gdal.GDT_Int16)
-    
-    driver = gdal.GetDriverByName('GTiff')
-    dataset = driver.Create(out_path, rasterXSize, rasterYSize, nbands, outType, 
-                          ['COMPRESS=DEFLATE'])
-    dataset.GetRasterBand(1).WriteArray(in_array)
-    dataset.GetRasterBand(1).SetNoDataValue(-3000)
-    
-    if kwargs.get("qa_array") is not None:
-        dataset.GetRasterBand(2).WriteArray(kwargs.get("qa_array"))
-    
-    dataset.SetGeoTransform(geoTransform)
-    dataset.FlushCache()
-    del dataset
-    
-    ds = gdal.Open(out_path, 1)
-    if ds:
-        ds.SetProjection(sr)
-        ds = None
-    
-    return None
+
+def _get_hdf4_geotransform(hdf_file):
+	"""
+	Extract geotransform and projection from HDF4 file using pyhdf.
+	
+	Parameters
+	----------
+	hdf_file : str
+		Path to HDF4 file
+		
+	Returns
+	-------
+	tuple : (geoTransform, projection_wkt, rasterXSize, rasterYSize)
+	"""
+	if not PYHDF_AVAILABLE:
+		raise ImportError("pyhdf is required to read HDF4 files. Install with: pip install pyhdf")
+	
+	# Open HDF4 file
+	hdf = SD(hdf_file, SDC.READ)
+	
+	# Get global attributes
+	attrs = hdf.attributes()
+	
+	# Default sinusoidal projection for MODIS
+	sr = 'PROJCS["unnamed",GEOGCS["Unknown datum based upon the custom spheroid",DATUM["Not specified (based on custom spheroid)",SPHEROID["Custom spheroid",6371007.181,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Sinusoidal"],PARAMETER["longitude_of_center",0],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["Meter",1]]'
+	
+	# Try to get StructMetadata
+	if 'StructMetadata.0' in attrs:
+		struct_meta = attrs['StructMetadata.0']
+		
+		# Parse StructMetadata for geotransform info
+		lines = struct_meta.split('\n')
+		ulc_lon = None
+		ulc_lat = None
+		pixel_size_x = None
+		pixel_size_y = None
+		x_dim = None
+		y_dim = None
+		
+		for line in lines:
+			if 'UpperLeftPointMtrs' in line:
+				# Extract coordinates - format: UpperLeftPointMtrs=(lon,lat)
+				coords = line.split('=')[1].strip('()\n ')
+				try:
+					ulc_lon, ulc_lat = map(float, coords.split(','))
+				except:
+					pass
+			elif 'XDim=' in line:
+				try:
+					x_dim = int(line.split('=')[1].strip())
+				except:
+					pass
+			elif 'YDim=' in line:
+				try:
+					y_dim = int(line.split('=')[1].strip())
+				except:
+					pass
+		
+		# For CMG products, pixel size is 0.05 degrees
+		if 'CMG' in os.path.basename(hdf_file):
+			pixel_size_x = 0.05
+			pixel_size_y = 0.05
+			if ulc_lon is not None and ulc_lat is not None:
+				# CMG coordinates are in millionths of degrees
+				ulc_lon = ulc_lon / 1000000.0
+				ulc_lat = ulc_lat / 1000000.0
+			# Use WGS84 projection for CMG
+			sr = 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]]'
+		else:
+			# For sinusoidal products, calculate pixel size
+			# Standard MODIS sinusoidal grid
+			if x_dim and y_dim:
+				# Get dataset to determine actual dimensions
+				datasets = hdf.datasets()
+				if datasets:
+					first_ds_name = list(datasets.keys())[0]
+					ds = hdf.select(first_ds_name)
+					dims = ds.dimensions()
+					if dims:
+						# Assume first two dimensions are Y, X
+						dim_names = list(dims.keys())
+						if len(dim_names) >= 2:
+							y_dim = dims[dim_names[0]]
+							x_dim = dims[dim_names[1]]
+					ds.endaccess()
+			
+			# Calculate pixel size based on tile dimensions
+			# Standard MODIS tile is 1200x1200 km at various resolutions
+			if '09Q1' in os.path.basename(hdf_file) or '13Q1' in os.path.basename(hdf_file):
+				# 250m resolution
+				pixel_size_x = 231.65635826395834
+				pixel_size_y = 231.65635826395834
+			elif '09A1' in os.path.basename(hdf_file):
+				# 500m resolution  
+				pixel_size_x = 463.31271652779167
+				pixel_size_y = 463.31271652779167
+			else:
+				# Default 1km resolution
+				pixel_size_x = 926.625433055833
+				pixel_size_y = 926.625433055833
+		
+		# Build geotransform
+		if ulc_lon is not None and ulc_lat is not None and pixel_size_x and pixel_size_y:
+			geoTransform = (ulc_lon, pixel_size_x, 0.0, ulc_lat, 0.0, -pixel_size_y)
+		else:
+			# Fallback to default values if parsing failed
+			geoTransform = None
+	else:
+		geoTransform = None
+	
+	# Get dimensions from a dataset
+	datasets = hdf.datasets()
+	if datasets:
+		first_ds_name = list(datasets.keys())[0]
+		ds = hdf.select(first_ds_name)
+		dims = ds.dimensions()
+		dim_values = list(dims.values())
+		if len(dim_values) >= 2:
+			rasterYSize = dim_values[0]
+			rasterXSize = dim_values[1]
+		else:
+			rasterYSize, rasterXSize = None, None
+		ds.endaccess()
+	else:
+		rasterYSize, rasterXSize = None, None
+	
+	hdf.end()
+	
+	return geoTransform, sr, rasterXSize, rasterYSize
+
+
+def toRaster(in_array,out_path,model_file,dtype = None,*args,**kwargs) -> None:
+	"""
+	This function saves a numpy array into a raster file, with
+	the same project and extents as the provided model file.
+
+	As implemented, this function works ONLY for arrays that can
+	be coerced to Int16 type.
+
+	...
+
+	Parameters
+	----------
+
+	in_array: numpy.array
+		The array to be written to disk
+	out_path: str
+		Full path to raster file where the output will be written
+	model_file: str
+		Existing raster file with matching spatial reference and geotransform
+	qa_array (optional): numpy.array
+		If this parameter is used, the output raster will have two bands. Band
+		1 stores in_array, band 2 stores qa_array
+	"""
+
+	# determine number of output bands
+	if kwargs.get("qa_array") is not None:
+		nbands = 2
+	else:
+		nbands = 1
+
+	## extract extent, geotransform, and projection
+	ext = os.path.splitext(model_file)[1]
+	
+	if ext == ".hdf":
+		# Use pyhdf for HDF4 files
+		try:
+			geoTransform, sr, rasterXSize, rasterYSize = _get_hdf4_geotransform(model_file)
+			
+			# If pyhdf parsing failed, fall back to GDAL
+			if geoTransform is None:
+				log.warning("Failed to parse geotransform from HDF4 with pyhdf, falling back to GDAL")
+				refDs = gdal.Open(model_file, 0)
+				if refDs is None:
+					raise octvi.exceptions.FileTypeError(f"Failed to open HDF4 file: {model_file}")
+				sr = refDs.GetProjection()
+				geoTransform = refDs.GetGeoTransform()
+				
+				# Handle GDAL subdataset structure
+				if geoTransform[1] == 1.0:
+					ds_sub = gdal.Open(refDs.GetSubDatasets()[0][0])
+					geoTransform = ds_sub.GetGeoTransform()
+					sr = ds_sub.GetProjection()
+					ds_sub = None
+				refDs = None
+		except Exception as e:
+			log.error(f"Error reading HDF4 file: {e}")
+			raise
+			
+	elif ext == ".h5":
+		# Use h5py for HDF5 files (VIIRS)
+		pixelSize = 463.3127165
+		try:
+			with h5py.File(model_file, mode='r') as refDs:
+				fileMetadata = refDs['HDFEOS INFORMATION']['StructMetadata.0'][()].split()
+				fileMetadata = [m.decode('utf-8') for m in fileMetadata]
+				ulc = [i for i in fileMetadata if 'UpperLeftPointMtrs' in i][0]
+				ulcLon = float(ulc.split('=(')[-1].replace(')', '').split(',')[0])
+				ulcLat = float(ulc.split('=(')[-1].replace(')', '').split(',')[1])
+				
+				# Special behavior for VNP09CMG
+				if 'CMG' in os.path.basename(model_file):
+					ulcLon = ulcLon / 1000000
+					ulcLat = ulcLat / 1000000
+					pixelSize = 0.05
+				
+				geoTransform = (ulcLon, pixelSize, 0.0, ulcLat, 0.0, -pixelSize)
+		except Exception as e:
+			log.error(f"Error reading HDF5 metadata: {e}")
+			# Fallback to GDAL
+			refDs = gdal.Open(model_file, 0)
+			if refDs is None:
+				raise octvi.exceptions.FileTypeError(f"Failed to open HDF5 file: {model_file}")
+			geoTransform = refDs.GetGeoTransform()
+			refDs = None
+		
+		# Viirs sinusoidal projection
+		sr = 'PROJCS["unnamed",GEOGCS["Unknown datum based upon the custom spheroid",DATUM["Not specified (based on custom spheroid)",SPHEROID["Custom spheroid",6371007.181,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Sinusoidal"],PARAMETER["longitude_of_center",0],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["Meter",1]]'
+	else:
+		# For other formats, use GDAL
+		refDs = gdal.Open(model_file, 0)
+		if refDs is None:
+			raise octvi.exceptions.FileTypeError(f"Failed to open file: {model_file}")
+		sr = refDs.GetProjection()
+		geoTransform = refDs.GetGeoTransform()
+		refDs = None
+	
+	# Get dimensions from array
+	rasterYSize, rasterXSize = in_array.shape
+
+	## parse datatype
+	typeTable = {"Byte":gdal.GDT_Byte,"Int16":gdal.GDT_Int16,"Int32":gdal.GDT_Int32,"Float32":gdal.GDT_Float32,"Float64":gdal.GDT_Float64}
+	outType = typeTable.get(dtype,gdal.GDT_Int16)
+	if( kwargs.get("qa_array") is not None) and (outType not in [gdal.GDT_Int16,gdal.GDT_Int32]):
+		log.warning("When qa_array is set in octvi.array.toRaster, dtype must be one of 'Int16' or 'Int32. Results will be coerced to Int16.")
+		outType = gdal.GDT_Int16
+
+	## write to disk
+	driver = gdal.GetDriverByName('GTiff')
+	dataset = driver.Create(out_path,rasterXSize,rasterYSize,nbands,outType,['COMPRESS=DEFLATE'])
+	dataset.GetRasterBand(1).WriteArray(in_array)
+	dataset.GetRasterBand(1).SetNoDataValue(-3000)
+	if kwargs.get("qa_array") is not None:
+		dataset.GetRasterBand(2).WriteArray(kwargs.get("qa_array"))
+	dataset.SetGeoTransform(geoTransform)
+	dataset.FlushCache() # Write to disk
+	del dataset
+
+	## project
+	ds = gdal.Open(out_path,1)
+	if ds:
+		res = ds.SetProjection(sr)
+		if res != 0:
+			log.error("--projection failed: {}".format(str(res)))
+		ds = None
+	else:
+		log.error("--could not open with GDAL")
+
+	return None
