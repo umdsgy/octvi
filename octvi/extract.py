@@ -3,101 +3,210 @@ import logging, os
 logging.basicConfig(level=os.environ.get("LOGLEVEL","INFO"))
 log = logging.getLogger(__name__)
 
-from pyhdf.SD import SD, SDC
-import h5py
-import numpy as np
-
 ## import modules
 import octvi.exceptions, octvi.array
-from osgeo import gdal
-from osgeo.gdal_array import *
 import numpy as np
+import h5py
+
+# Import pyhdf for HDF4 files
+try:
+    from pyhdf.SD import SD, SDC
+    PYHDF_AVAILABLE = True
+except ImportError:
+    log.warning("pyhdf not available. HDF4 file support will be limited.")
+    PYHDF_AVAILABLE = False
 
 
-def getDatasetNames(stack_path: str) -> list:
-    """
-    Returns list of all subdataset names
-    """
-    ext = os.path.splitext(stack_path)[1]
-    
-    if ext == ".hdf":
-        # Use pyhdf for HDF4
-        hdf = SD(stack_path, SDC.READ)
-        datasets = hdf.datasets()
-        dataset_names = list(datasets.keys())
-        hdf.end()
-        return dataset_names
-        
-    elif ext == ".h5":
-        # Use h5py for HDF5
-        dataset_names = []
-        with h5py.File(stack_path, 'r') as f:
-            if 'HDFEOS' in f:
-                grid_name = list(f['HDFEOS']['GRIDS'].keys())[0]
-                data_fields = f[f'HDFEOS/GRIDS/{grid_name}/Data Fields']
-                dataset_names = list(data_fields.keys())
-            else:
-                def get_datasets(name, obj):
-                    if isinstance(obj, h5py.Dataset):
-                        dataset_names.append(name)
-                f.visititems(get_datasets)
-        return dataset_names
-    else:
-        raise octvi.exceptions.FileTypeError("File must be .hdf or .h5")
+def getDatasetNames(stack_path:str) -> list:
+	"""
+	Returns list of all subdataset names, in format
+	suitable for passing to other functions'
+	'dataset_name' argument
+	"""
 
-def datasetToPath(stack_path,dataset_name) -> str:
-	## parsing arguments
 	ext = os.path.splitext(stack_path)[1]
+	
 	if ext == ".hdf":
-		splitter = ":"
+		# Use pyhdf for HDF4
+		if not PYHDF_AVAILABLE:
+			raise ImportError("pyhdf is required to read HDF4 files. Install with: pip install pyhdf")
+		
+		hdf = SD(stack_path, SDC.READ)
+		datasets = hdf.datasets()
+		dataset_names = list(datasets.keys())
+		hdf.end()
+		return dataset_names
+		
 	elif ext == ".h5":
-		splitter = "/"
+		# Use h5py for HDF5
+		dataset_names = []
+		with h5py.File(stack_path, 'r') as f:
+			# VIIRS structure: /HDFEOS/GRIDS/[GridName]/Data Fields/[dataset_name]
+			if 'HDFEOS' in f and 'GRIDS' in f['HDFEOS']:
+				grid_names = list(f['HDFEOS']['GRIDS'].keys())
+				if grid_names:
+					grid_name = grid_names[0]
+					if 'Data Fields' in f[f'HDFEOS/GRIDS/{grid_name}']:
+						data_fields = f[f'HDFEOS/GRIDS/{grid_name}/Data Fields']
+						dataset_names = list(data_fields.keys())
+			else:
+				# Fallback: search for all datasets
+				def get_datasets(name, obj):
+					if isinstance(obj, h5py.Dataset):
+						dataset_names.append(name.split('/')[-1])
+				f.visititems(get_datasets)
+		return dataset_names
 	else:
 		raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
 
-	## searching heirarchy for matching subdataset
-	outSd = None
-	ds = gdal.Open(stack_path,0) # open stack as gdal dataset
-	for sd in ds.GetSubDatasets():
-		sdName = sd[0].split(splitter)[-1]
-		if sdName.strip("\"") == dataset_name:
-			outSd = sd[0]
-
-	if outSd is None:
-		raise octvi.exceptions.DatasetNotFoundError(f"Dataset '{dataset_name}' not found in '{os.path.basename(stack_path)}'")
-
-	return outSd
 
 def datasetToArray(stack_path, dataset_name) -> "numpy array":
-    """
-    Extract subdataset from HDF4 or HDF5 file using pyhdf/h5py
-    """
-    ext = os.path.splitext(stack_path)[1]
-    
-    if ext == ".hdf":
-        # Use pyhdf for HDF4 files
-        hdf = SD(stack_path, SDC.READ)
-        dataset = hdf.select(dataset_name)
-        data = dataset.get()
-        hdf.end()
-        return data
-        
-    elif ext == ".h5":
-        # Use h5py for HDF5 files
-        with h5py.File(stack_path, 'r') as f:
-            # VIIRS structure: /HDFEOS/GRIDS/[GridName]/Data Fields/[dataset_name]
-            if 'HDFEOS' in f:
-                grid_name = list(f['HDFEOS']['GRIDS'].keys())[0]
-                data = f[f'HDFEOS/GRIDS/{grid_name}/Data Fields/{dataset_name}'][:]
-            else:
-                data = f[dataset_name][:]
-        return data
-    else:
-        raise octvi.exceptions.FileTypeError("File must be .hdf or .h5")
+	"""
+	This function extracts a specified subdataset from a hierarchical format
+	(HDF4 or HDF5) and returns it as a numpy array.
+
+	...
+
+	Parameters
+	----------
+
+	stack_path: str
+		Full path to hierarchical file containing the desired subdataset
+	dataset_name: str
+		Name of desired subdataset, as it appears in the hierarchical file
+	"""
+
+	ext = os.path.splitext(stack_path)[1]
+	
+	if ext == ".hdf":
+		# Use pyhdf for HDF4 files
+		if not PYHDF_AVAILABLE:
+			raise ImportError("pyhdf is required to read HDF4 files. Install with: pip install pyhdf")
+		
+		try:
+			hdf = SD(stack_path, SDC.READ)
+			
+			# List available datasets for debugging
+			available_datasets = list(hdf.datasets().keys())
+			
+			if dataset_name not in available_datasets:
+				hdf.end()
+				raise octvi.exceptions.DatasetNotFoundError(
+					f"Dataset '{dataset_name}' not found in '{os.path.basename(stack_path)}'. "
+					f"Available datasets: {available_datasets}"
+				)
+			
+			dataset = hdf.select(dataset_name)
+			data = dataset.get()
+			dataset.endaccess()
+			hdf.end()
+			
+			return data
+			
+		except Exception as e:
+			log.error(f"Error reading dataset '{dataset_name}' from HDF4 file: {e}")
+			raise
+		
+	elif ext == ".h5":
+		# Use h5py for HDF5 files
+		try:
+			with h5py.File(stack_path, 'r') as f:
+				# Try VIIRS structure first: /HDFEOS/GRIDS/[GridName]/Data Fields/[dataset_name]
+				if 'HDFEOS' in f and 'GRIDS' in f['HDFEOS']:
+					grid_names = list(f['HDFEOS']['GRIDS'].keys())
+					if grid_names:
+						grid_name = grid_names[0]
+						data_fields_path = f'HDFEOS/GRIDS/{grid_name}/Data Fields'
+						if data_fields_path in f and dataset_name in f[data_fields_path]:
+							data = f[f'{data_fields_path}/{dataset_name}'][:]
+							return data
+				
+				# Fallback: search for dataset by name
+				dataset_path = None
+				def find_dataset(name, obj):
+					nonlocal dataset_path
+					if isinstance(obj, h5py.Dataset) and name.split('/')[-1] == dataset_name:
+						dataset_path = name
+				
+				f.visititems(find_dataset)
+				
+				if dataset_path:
+					data = f[dataset_path][:]
+					return data
+				else:
+					raise octvi.exceptions.DatasetNotFoundError(
+						f"Dataset '{dataset_name}' not found in '{os.path.basename(stack_path)}'"
+					)
+					
+		except octvi.exceptions.DatasetNotFoundError:
+			raise
+		except Exception as e:
+			log.error(f"Error reading dataset '{dataset_name}' from HDF5 file: {e}")
+			raise
+	else:
+		raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
+
+
+def datasetToPath(stack_path, dataset_name) -> str:
+	"""
+	Returns the full path to a subdataset within a hierarchical file.
+	For HDF4, returns GDAL subdataset path. For HDF5, returns h5py-style path.
+	"""
+	ext = os.path.splitext(stack_path)[1]
+	
+	if ext == ".hdf":
+		# For HDF4, we still use GDAL subdataset notation for compatibility
+		# even though we read data with pyhdf
+		from osgeo import gdal
+		ds = gdal.Open(stack_path, 0)
+		if ds is None:
+			raise octvi.exceptions.FileTypeError(f"Failed to open HDF4 file: {stack_path}")
+		
+		for sd in ds.GetSubDatasets():
+			sdName = sd[0].split(":")[-1].strip('"')
+			if sdName == dataset_name:
+				ds = None
+				return sd[0]
+		
+		ds = None
+		raise octvi.exceptions.DatasetNotFoundError(
+			f"Dataset '{dataset_name}' not found in '{os.path.basename(stack_path)}'"
+		)
+		
+	elif ext == ".h5":
+		# For HDF5, return h5py path
+		with h5py.File(stack_path, 'r') as f:
+			# Try VIIRS structure
+			if 'HDFEOS' in f and 'GRIDS' in f['HDFEOS']:
+				grid_names = list(f['HDFEOS']['GRIDS'].keys())
+				if grid_names:
+					grid_name = grid_names[0]
+					data_fields_path = f'HDFEOS/GRIDS/{grid_name}/Data Fields'
+					if data_fields_path in f and dataset_name in f[data_fields_path]:
+						return f'{data_fields_path}/{dataset_name}'
+			
+			# Fallback: search for dataset
+			dataset_path = None
+			def find_dataset(name, obj):
+				nonlocal dataset_path
+				if isinstance(obj, h5py.Dataset) and name.split('/')[-1] == dataset_name:
+					dataset_path = name
+			
+			f.visititems(find_dataset)
+			
+			if dataset_path:
+				return dataset_path
+			else:
+				raise octvi.exceptions.DatasetNotFoundError(
+					f"Dataset '{dataset_name}' not found in '{os.path.basename(stack_path)}'"
+				)
+	else:
+		raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
+
 
 def datasetToRaster(stack_path,dataset_name, out_path,dtype = None, *args, **kwargs) -> None:
 	"""
-	Wrapper for extractAsArray and arrayToRaster which pulls
+	Wrapper for datasetToArray and arrayToRaster which pulls
 	subdataset from hdf or h5 file and saves to new location.
 
 	...
@@ -114,11 +223,12 @@ def datasetToRaster(stack_path,dataset_name, out_path,dtype = None, *args, **kwa
 	sd_array = datasetToArray(stack_path, dataset_name)
 	return octvi.array.toRaster(sd_array, out_path, model_file = stack_path,dtype=dtype)
 
+
 def ndviToArray(in_stack) -> "numpy array":
 	"""
 	This function finds the correct Red and NIR bands
 	from a hierarchical file, calculates an NDVI array,
-	and returns the outpus in numpy array format.
+	and returns the output in numpy array format.
 
 	Valid input formats are MODIS HDF or VIIRS HDF5 (h5).
 
@@ -179,11 +289,12 @@ def ndviToArray(in_stack) -> "numpy array":
 
 	return arr_ndvi
 
+
 def gcviToArray(in_stack:str) -> "numpy array":
 	"""
 	This function finds the correct Green and NIR bands
 	from a hierarchical file, calculates a GCVI array,
-	and returns the outpus in numpy array format.
+	and returns the output in numpy array format.
 
 	Valid input format is MOD09CMG HDF.
 
@@ -229,11 +340,12 @@ def gcviToArray(in_stack:str) -> "numpy array":
 
 	return arr_gcvi
 
+
 def ndwiToArray(in_stack:str) -> "numpy array":
 	"""
 	This function finds the correct SWIR and NIR bands
 	from a hierarchical file, calculates a NDWI array,
-	and returns the outpus in numpy array format.
+	and returns the output in numpy array format.
 
 	Valid input format is HDF.
 
@@ -256,9 +368,10 @@ def ndwiToArray(in_stack:str) -> "numpy array":
 		arr_swir = datasetToArray(in_stack,sdName_swir)
 		arr_ndwi = octvi.array.calcNdwi(arr_nir,arr_swir)
 	else:
-		raise octvi.exceptions.UnsupportedError("Only MOD09A1 imagery is supported for GCVI generation")
+		raise octvi.exceptions.UnsupportedError("Only MOD09A1 imagery is supported for NDWI generation")
 
 	return arr_ndwi
+
 
 def ndviToRaster(in_stack,out_path,qa_name=None) -> str:
 	"""
@@ -284,26 +397,16 @@ def ndviToRaster(in_stack,out_path,qa_name=None) -> str:
 	# apply cloud, shadow, and water masks
 	ndviArray = octvi.array.mask(ndviArray, in_stack)
 
-	sample_sd = getDatasetNames(in_stack)[0]
-
-	#ext = os.path.splitext(in_stack)[1]
-	#if ext == ".hdf":
-		#sample_sd = "sur_refl_b01"
-	#elif ext == ".h5":
-		#sample_sd = "SurfReflect_I1"
-	#else:
-		#raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
 	if qa_name is None:
-		#octvi.array.toRaster(ndviArray,out_path,datasetToPath(in_stack,sample_sd))
-		octvi.array.toRaster(ndviArray,out_path,in_stack,sample_sd)
+		octvi.array.toRaster(ndviArray,out_path,in_stack)
 	else:
 		# get qa array
 		qaArray = datasetToArray(in_stack,qa_name)
 		# create multiband at out_path
-		#octvi.array.toRaster(ndviArray,out_path,datasetToPath(in_stack,sample_sd),qa_array = qaArray)
 		octvi.array.toRaster(ndviArray,out_path,in_stack,qa_array = qaArray)
 
 	return out_path
+
 
 def gcviToRaster(in_stack:str,out_path:str) -> str:
 	"""
@@ -319,19 +422,10 @@ def gcviToRaster(in_stack:str,out_path:str) -> str:
 	# apply cloud, shadow, and water masks
 	gcviArray = octvi.array.mask(gcviArray, in_stack)
 
-	sample_sd = getDatasetNames(in_stack)[0]
-
-	#ext = os.path.splitext(in_stack)[1]
-	#if ext == ".hdf":
-		#sample_sd = "sur_refl_b01"
-	#elif ext == ".h5":
-		#sample_sd = "SurfReflect_I1"
-	#else:
-		#raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
-
-	octvi.array.toRaster(gcviArray,out_path,datasetToPath(in_stack,sample_sd))
+	octvi.array.toRaster(gcviArray,out_path,in_stack)
 
 	return out_path
+
 
 def ndwiToRaster(in_stack:str, out_path:str) -> str:
 	"""
@@ -341,17 +435,16 @@ def ndwiToRaster(in_stack:str, out_path:str) -> str:
 	Returns the string path to the output file
 	"""
 
-	# create gcvi array
+	# create ndwi array
 	ndwiArray = ndwiToArray(in_stack)
 
 	# apply cloud, shadow, and water masks
 	ndwiArray = octvi.array.mask(ndwiArray, in_stack)
 
-	sample_sd = getDatasetNames(in_stack)[0]
-
-	octvi.array.toRaster(ndwiArray,out_path,datasetToPath(in_stack,sample_sd))
+	octvi.array.toRaster(ndwiArray,out_path,in_stack)
 
 	return out_path
+
 
 def cmgToViewAngArray(source_stack,product="MOD09CMG") -> "numpy array":
 	"""
@@ -378,6 +471,7 @@ def cmgToViewAngArray(source_stack,product="MOD09CMG") -> "numpy array":
 		vang_arr = datasetToArray(source_stack,"SensorZenith")
 		vang_arr[vang_arr<=0]=9999
 	return vang_arr
+
 
 def cmgListToWaterArray(stacks:list,product="MOD09CMG") -> "numpy array":
 	"""
@@ -415,6 +509,7 @@ def cmgListToWaterArray(stacks:list,product="MOD09CMG") -> "numpy array":
 		water_list.append(water)
 	water_final = np.maximum.reduce(water_list)
 	return water_final
+
 
 def cmgToRankArray(source_stack,product="MOD09CMG") -> "numpy array":
 	"""
@@ -499,7 +594,6 @@ def cmgToRankArray(source_stack,product="MOD09CMG") -> "numpy array":
 		water[water!=1]=0 # set non-water to zero
 
 	elif product == "VNP09CMG":
-		#print("cmgToRankArray(product='VNP09CMG')")
 		qf2 = datasetToArray(source_stack,"SurfReflect_QF2")
 		qf4 = datasetToArray(source_stack,"SurfReflect_QF4")
 		state_arr = datasetToArray(source_stack,"State_QA")
@@ -564,6 +658,7 @@ def cmgToRankArray(source_stack,product="MOD09CMG") -> "numpy array":
 	# return the results
 	return rank_arr
 
+
 def cmgBestViPixels(input_stacks:list,vi="NDVI",product = "MOD09CMG",snow_mask=False) -> "numpy array":
 	"""
 	This function takes a list of hdf stack paths, and
@@ -611,14 +706,9 @@ def cmgBestViPixels(input_stacks:list,vi="NDVI",product = "MOD09CMG",snow_mask=F
 
 	idealVang = np.minimum.reduce(vangArrays)
 
-	#print("Max vang:")
-	#print(np.amax(idealVang))
-	#octvi.array.toRaster(idealVang,"C:/temp/MOD09CMG.VANG.tif",input_stacks[0])
-	#octvi.array.toRaster(idealRank,"C:/temp/VNP09CMG.RANK.tif",input_stacks[0])
-
 	finalVi = np.full(viArrays[0].shape,-3000)
 
-	# mask each ndviArray to only where it matches ideal rank
+	# mask each viArray to only where it matches ideal rank
 	for i in range(len(viArrays)):
 		finalVi[vangArrays[i] == idealVang] = viArrays[i][vangArrays[i] == idealVang]
 
@@ -631,6 +721,7 @@ def cmgBestViPixels(input_stacks:list,vi="NDVI",product = "MOD09CMG",snow_mask=F
 
 	# return result
 	return finalVi
+
 
 def qaTo8BitArray(stack_path) -> "numpy array":
 	"""Returns an 8-bit QA array for the passed image file
