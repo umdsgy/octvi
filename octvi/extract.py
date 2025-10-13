@@ -3,6 +3,10 @@ import logging, os
 logging.basicConfig(level=os.environ.get("LOGLEVEL","INFO"))
 log = logging.getLogger(__name__)
 
+from pyhdf.SD import SD, SDC
+import h5py
+import numpy as np
+
 ## import modules
 import octvi.exceptions, octvi.array
 from osgeo import gdal
@@ -10,30 +14,36 @@ from osgeo.gdal_array import *
 import numpy as np
 
 
-def getDatasetNames(stack_path:str) -> list:
-	"""
-	Returns list of all subdataset names, in format
-	suitable for passing to other functions'
-	'dataset_name' argument
-	"""
-
-	## parsing arguments
-	ext = os.path.splitext(stack_path)[1]
-	if ext == ".hdf":
-		splitter = ":"
-	elif ext == ".h5":
-		splitter = "/"
-	else:
-		raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
-
-	## loop over all subdatasets
-	outSds = []
-	ds = gdal.Open(stack_path,0) # open stack as gdal dataset
-	for sd in ds.GetSubDatasets():
-		sdName = sd[0].split(splitter)[-1] # split name out of path
-		outSds.append(sdName.strip("\"")) # strip away quotes
-
-	return outSds
+def getDatasetNames(stack_path: str) -> list:
+    """
+    Returns list of all subdataset names
+    """
+    ext = os.path.splitext(stack_path)[1]
+    
+    if ext == ".hdf":
+        # Use pyhdf for HDF4
+        hdf = SD(stack_path, SDC.READ)
+        datasets = hdf.datasets()
+        dataset_names = list(datasets.keys())
+        hdf.end()
+        return dataset_names
+        
+    elif ext == ".h5":
+        # Use h5py for HDF5
+        dataset_names = []
+        with h5py.File(stack_path, 'r') as f:
+            if 'HDFEOS' in f:
+                grid_name = list(f['HDFEOS']['GRIDS'].keys())[0]
+                data_fields = f[f'HDFEOS/GRIDS/{grid_name}/Data Fields']
+                dataset_names = list(data_fields.keys())
+            else:
+                def get_datasets(name, obj):
+                    if isinstance(obj, h5py.Dataset):
+                        dataset_names.append(name)
+                f.visititems(get_datasets)
+        return dataset_names
+    else:
+        raise octvi.exceptions.FileTypeError("File must be .hdf or .h5")
 
 def datasetToPath(stack_path,dataset_name) -> str:
 	## parsing arguments
@@ -58,28 +68,32 @@ def datasetToPath(stack_path,dataset_name) -> str:
 
 	return outSd
 
-def datasetToArray(stack_path,dataset_name) -> "numpy array":
-	"""
-	This function copies a specified subdataset from a heirarchical format
-	(such as HDF or NetCDF) to a single file such as a Tiff.
-
-	...
-
-	Parameters
-	----------
-
-	stack_path: str
-		Full path to heirarchical file containing the desired subdataset
-	dataset_name: str
-		Name of desired subdataset, as it appears in the heirarchical file
-	"""
-
-	sd = datasetToPath(stack_path, dataset_name)
-
-	## return subdataset as numpy array
-	subDs = gdal.Open(sd, 0)
-	subDs_band = subDs.GetRasterBand(1)
-	return BandReadAsArray(subDs_band)
+def datasetToArray(stack_path, dataset_name) -> "numpy array":
+    """
+    Extract subdataset from HDF4 or HDF5 file using pyhdf/h5py
+    """
+    ext = os.path.splitext(stack_path)[1]
+    
+    if ext == ".hdf":
+        # Use pyhdf for HDF4 files
+        hdf = SD(stack_path, SDC.READ)
+        dataset = hdf.select(dataset_name)
+        data = dataset.get()
+        hdf.end()
+        return data
+        
+    elif ext == ".h5":
+        # Use h5py for HDF5 files
+        with h5py.File(stack_path, 'r') as f:
+            # VIIRS structure: /HDFEOS/GRIDS/[GridName]/Data Fields/[dataset_name]
+            if 'HDFEOS' in f:
+                grid_name = list(f['HDFEOS']['GRIDS'].keys())[0]
+                data = f[f'HDFEOS/GRIDS/{grid_name}/Data Fields/{dataset_name}'][:]
+            else:
+                data = f[dataset_name][:]
+        return data
+    else:
+        raise octvi.exceptions.FileTypeError("File must be .hdf or .h5")
 
 def datasetToRaster(stack_path,dataset_name, out_path,dtype = None, *args, **kwargs) -> None:
 	"""
