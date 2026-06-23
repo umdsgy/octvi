@@ -79,7 +79,9 @@ QA_DICT = {
     "MOD13Q4N": "250m 8 days VI Quality",
     "MOD09CMG": None,
     "VNP09CMG": None,
-    "MOD09A1": "sur_refl_state_500m"
+    "MOD09A1": "sur_refl_state_500m",
+    "VNP09A1": "SurfReflect_State_1km",
+    "VJ109A1": "SurfReflect_State_1km"
 }
 
 try:

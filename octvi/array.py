@@ -314,15 +314,18 @@ def mask(in_array, source_stack) -> "numpy array":
 	else:
 		# modis
 		## MOD09A1
-		if suffix == "09A1":
+		if suffix == "09A1" and ext == ".hdf":
 			qa_arr = octvi.extract.datasetToArray(source_stack, "sur_refl_qc_500m")
 			state_arr = octvi.extract.datasetToArray(source_stack,"sur_refl_state_500m")
+		## VNP09A1 / VJ109A1 (VIIRS 1km tiled)
+		elif suffix == "09A1" and ext == ".h5":
+			state_arr = octvi.extract.datasetToArray(source_stack, "SurfReflect_State_1km")
 		## all other MODIS products
 		elif ext == ".hdf":
 			qa_arr = octvi.extract.datasetToArray(source_stack, "sur_refl_qc_250m")
 			state_arr = octvi.extract.datasetToArray(source_stack,"sur_refl_state_250m")
 
-		# viirs
+		# viirs VNP09H1 (500m tiled)
 		elif ext == ".h5":
 			qa_arr = octvi.extract.datasetToArray(source_stack, "SurfReflect_QC_500m")
 			state_arr = octvi.extract.datasetToArray(source_stack,"SurfReflect_State_500m")
@@ -556,13 +559,16 @@ def toRaster(in_array,out_path,model_file,dtype = None,*args,**kwargs) -> None:
 				ulc = [i for i in fileMetadata if 'UpperLeftPointMtrs' in i][0]
 				ulcLon = float(ulc.split('=(')[-1].replace(')', '').split(',')[0])
 				ulcLat = float(ulc.split('=(')[-1].replace(')', '').split(',')[1])
-				
+
 				# Special behavior for VNP09CMG
 				if 'CMG' in os.path.basename(model_file):
 					ulcLon = ulcLon / 1000000
 					ulcLat = ulcLat / 1000000
 					pixelSize = 0.05
-				
+				# VNP09A1 / VJ109A1 are 1km products
+				elif '09A1' in os.path.basename(model_file):
+					pixelSize = 926.625433055833
+
 				geoTransform = (ulcLon, pixelSize, 0.0, ulcLat, 0.0, -pixelSize)
 		except Exception as e:
 			log.error(f"Error reading HDF5 metadata: {e}")

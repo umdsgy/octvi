@@ -275,8 +275,12 @@ def ndviToArray(in_stack) -> "numpy array":
 			sdName_red = "sur_refl_b01"
 			sdName_nir = "sur_refl_b02"
 		elif ext == ".h5":
-			sdName_red = "SurfReflect_I1"
-			sdName_nir = "SurfReflect_I2"
+			if suffix == "09A1":  # VNP09A1 / VJ109A1 use M-bands at 1km
+				sdName_red = "SurfReflect_M5"
+				sdName_nir = "SurfReflect_M7"
+			else:  # VNP09H1 uses I-bands at 500m
+				sdName_red = "SurfReflect_I1"
+				sdName_nir = "SurfReflect_I2"
 		else:
 			raise octvi.exceptions.FileTypeError("File must be of type .hdf or .h5")
 
@@ -329,14 +333,21 @@ def gcviToArray(in_stack:str) -> "numpy array":
 		arr_gcvi = octvi.array.calcGcvi(arr_green,arr_nir)
 
 	elif suffix == "09A1":
-		sdName_green = "sur_refl_b04"
-		sdName_nir = "sur_refl_b02"
-		arr_green = datasetToArray(in_stack,sdName_green)
-		arr_nir = datasetToArray(in_stack,sdName_nir)
-		arr_gcvi = octvi.array.calcGcvi(arr_green,arr_nir)
+		ext = os.path.splitext(in_stack)[1]
+		if ext == ".hdf":  # MOD09A1
+			sdName_green = "sur_refl_b04"
+			sdName_nir = "sur_refl_b02"
+		elif ext == ".h5":  # VNP09A1 / VJ109A1 use M-bands at 1km
+			sdName_green = "SurfReflect_M4"
+			sdName_nir = "SurfReflect_M7"
+		else:
+			raise octvi.exceptions.FileTypeError("File must be of format .hdf or .h5")
+		arr_green = datasetToArray(in_stack, sdName_green)
+		arr_nir = datasetToArray(in_stack, sdName_nir)
+		arr_gcvi = octvi.array.calcGcvi(arr_green, arr_nir)
 
 	else:
-		raise octvi.exceptions.UnsupportedError("Only MOD09CMG and MOD09A1 imagery is supported for GCVI generation")
+		raise octvi.exceptions.UnsupportedError("Only MOD09CMG, MOD09A1, VNP09A1, and VJ109A1 imagery is supported for GCVI generation")
 
 	return arr_gcvi
 
