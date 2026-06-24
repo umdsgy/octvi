@@ -319,7 +319,7 @@ def mask(in_array, source_stack) -> "numpy array":
 			state_arr = octvi.extract.datasetToArray(source_stack,"sur_refl_state_500m")
 		## VNP09A1 / VJ109A1 (VIIRS 1km tiled)
 		elif suffix == "09A1" and ext == ".h5":
-			state_arr = octvi.extract.datasetToArray(source_stack, "SurfReflect_State_1km")
+			state_arr = octvi.extract.datasetToArray(source_stack, "SurfReflect_State")
 		## all other MODIS products
 		elif ext == ".hdf":
 			qa_arr = octvi.extract.datasetToArray(source_stack, "sur_refl_qc_250m")

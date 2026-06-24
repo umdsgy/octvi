@@ -80,8 +80,8 @@ QA_DICT = {
     "MOD09CMG": None,
     "VNP09CMG": None,
     "MOD09A1": "sur_refl_state_500m",
-    "VNP09A1": "SurfReflect_State_1km",
-    "VJ109A1": "SurfReflect_State_1km"
+    "VNP09A1": "SurfReflect_State",
+    "VJ109A1": "SurfReflect_State"
 }
 
 try:
@@ -153,7 +153,7 @@ def mosaic(in_files: list, out_path: str, compression="DEFLATE") -> str:
             shutil.copyfileobj(rf, wf)
 
     # delete nodata from file
-    ds = gdal.Open(interim_path, 1)
+    ds = gdal.OpenEx(interim_path, gdal.GA_Update, open_options=["IGNORE_COG_LAYOUT_BREAK=YES"])
     for i in range(ds.RasterCount):
         ds.GetRasterBand(i + 1).DeleteNoDataValue()
     ds = None
@@ -162,7 +162,7 @@ def mosaic(in_files: list, out_path: str, compression="DEFLATE") -> str:
     subprocess.call(["gdaladdo", interim_path, "2", "4", "8", "16", "32", "64", "128", "256", "512", "1024"])
 
     # put nodata back on file
-    ds = gdal.Open(interim_path, 1)
+    ds = gdal.OpenEx(interim_path, gdal.GA_Update, open_options=["IGNORE_COG_LAYOUT_BREAK=YES"])
     for i in range(ds.RasterCount):
         ds.GetRasterBand(i + 1).SetNoDataValue(-3000)
     ds = None
